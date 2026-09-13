@@ -1,0 +1,107 @@
+$ErrorActionPreference = "Stop"
+
+$PinnedCommit = "52a939a2a762224e255d366c1182b2af4dd1a032"
+$Version = "1.0.0"
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Whisper = Join-Path $Root "whisper.cpp"
+$AndroidProject = Join-Path $Whisper "examples\whisper.android.java"
+$Overlay = Join-Path $Root "overlay"
+$RootPatches = Join-Path $Root "root-patches"
+$Out = Join-Path $Root "out"
+
+Write-Host "=== Whisper Live Android v$Version build ===" -ForegroundColor Cyan
+Write-Host "whisper.cpp commit: $PinnedCommit"
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "Brak git w PATH." }
+if (-not (Get-Command java -ErrorAction SilentlyContinue)) { throw "Brak Java w PATH. Wymagane JDK 17+." }
+
+if (-not (Test-Path $Whisper)) {
+    Write-Host "Pobieranie whisper.cpp..."
+    git clone https://github.com/ggml-org/whisper.cpp.git $Whisper
+}
+
+$WhisperGit = Join-Path $Whisper ".git"
+if (Test-Path $WhisperGit) {
+    Push-Location $Whisper
+    try {
+        git fetch --all --tags
+        git reset --hard $PinnedCommit
+        git clean -fdx
+    } finally { Pop-Location }
+} else {
+    Write-Host "Uzywam dolaczonego zrodla whisper.cpp." -ForegroundColor DarkGray
+}
+
+if (-not (Test-Path $AndroidProject)) { throw "Brak projektu examples/whisper.android.java." }
+
+Write-Host "Nakladanie Whisper Live v$Version..."
+$JavaDir = Join-Path $AndroidProject "app\src\main\java"
+if (Test-Path $JavaDir) { Remove-Item $JavaDir -Recurse -Force }
+$ResDir = Join-Path $AndroidProject "app\src\main\res"
+if (Test-Path $ResDir) { Remove-Item $ResDir -Recurse -Force }
+New-Item $JavaDir -ItemType Directory -Force | Out-Null
+Copy-Item (Join-Path $Overlay "app\*") (Join-Path $AndroidProject "app") -Recurse -Force
+
+Copy-Item (Join-Path $RootPatches "build.gradle") (Join-Path $AndroidProject "build.gradle") -Force
+Copy-Item (Join-Path $RootPatches "gradle.properties") (Join-Path $AndroidProject "gradle.properties") -Force
+Copy-Item (Join-Path $RootPatches "gradle-wrapper.properties") `
+    (Join-Path $AndroidProject "gradle\wrapper\gradle-wrapper.properties") -Force
+
+$Sdk = $env:ANDROID_SDK_ROOT
+if ([string]::IsNullOrWhiteSpace($Sdk)) { $Sdk = $env:ANDROID_HOME }
+if ([string]::IsNullOrWhiteSpace($Sdk)) {
+    $Candidate = Join-Path $env:LOCALAPPDATA "Android\Sdk"
+    if (Test-Path $Candidate) { $Sdk = $Candidate }
+}
+if ([string]::IsNullOrWhiteSpace($Sdk) -or -not (Test-Path $Sdk)) {
+    throw "Nie znaleziono Android SDK. Ustaw ANDROID_SDK_ROOT albo zainstaluj Android Studio/SDK."
+}
+
+$SdkGradle = $Sdk.Replace('\','/').Replace(':','\:')
+"sdk.dir=$SdkGradle" | Set-Content -Path (Join-Path $AndroidProject "local.properties") -Encoding ASCII
+
+function Find-SdkManager([string]$SdkRoot) {
+    $candidates = @(
+        (Join-Path $SdkRoot "cmdline-tools\latest\bin\sdkmanager.bat"),
+        (Join-Path $SdkRoot "tools\bin\sdkmanager.bat")
+    )
+    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
+    $all = Get-ChildItem -Path (Join-Path $SdkRoot "cmdline-tools") -Filter "sdkmanager.bat" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($all) { return $all.FullName }
+    return $null
+}
+
+$SdkManager = Find-SdkManager $Sdk
+$Platform = Join-Path $Sdk "platforms\android-36"
+if (-not (Test-Path $Platform)) {
+    if (-not $SdkManager) { throw "Brak Android SDK Platform 36 i sdkmanager." }
+    & $SdkManager "platforms;android-36" "build-tools;36.0.0"
+    if ($LASTEXITCODE -ne 0) { throw "Nie udało sie zainstalowac SDK 36." }
+}
+
+$Ndk = Join-Path $Sdk "ndk\25.2.9519653"
+if (-not (Test-Path $Ndk)) {
+    if (-not $SdkManager) { throw "Brak NDK 25.2.9519653 i sdkmanager." }
+    & $SdkManager "ndk;25.2.9519653"
+    if ($LASTEXITCODE -ne 0) { throw "Nie udało sie zainstalowac NDK 25.2.9519653." }
+}
+
+Write-Host "Budowanie APK debug i release (arm64-v8a)..." -ForegroundColor Cyan
+Push-Location $AndroidProject
+try {
+    .\gradlew.bat --no-daemon clean :app:assembleDebug :app:assembleRelease
+    if ($LASTEXITCODE -ne 0) { throw "Gradle zakonczyl sie kodem $LASTEXITCODE" }
+} finally { Pop-Location }
+
+New-Item $Out -ItemType Directory -Force | Out-Null
+$Variants = @(
+    @{ Name = "debug"; Apk = "app\build\outputs\apk\debug\app-debug.apk" },
+    @{ Name = "release"; Apk = "app\build\outputs\apk\release\app-release.apk" }
+)
+foreach ($Variant in $Variants) {
+    $Apk = Join-Path $AndroidProject $Variant.Apk
+    if (-not (Test-Path $Apk)) { throw "Nie znaleziono APK: $Apk" }
+    $Dest = Join-Path $Out "WhisperLive-v$Version-arm64-$($Variant.Name).apk"
+    Copy-Item $Apk $Dest -Force
+    Write-Host "GOTOWE: $Dest" -ForegroundColor Green
+}
