@@ -16,6 +16,28 @@ static bool abort_callback(void * user_data) {
     return atomic_load_explicit(&g_abort_requested, memory_order_relaxed);
 }
 
+// NewStringUTF wymaga "Modified UTF-8" i w trybie CheckJNI (APK debug) przerywa proces,
+// gdy dostanie niepełną sekwencję — a pojedynczy token Whispera często kończy się
+// w połowie wielobajtowego znaku (ą, ę, ł…). Budujemy więc String z bajtów,
+// a niepoprawne sekwencje Java zamienia na U+FFFD.
+static jstring utf8_to_jstring(JNIEnv * env, const char * text) {
+    if (text == NULL) text = "";
+    const jsize len = (jsize) strlen(text);
+    jbyteArray bytes = (*env)->NewByteArray(env, len);
+    if (bytes == NULL) return NULL;
+    (*env)->SetByteArrayRegion(env, bytes, 0, len, (const jbyte *) text);
+    jclass string_class = (*env)->FindClass(env, "java/lang/String");
+    jmethodID ctor = string_class == NULL ? NULL
+            : (*env)->GetMethodID(env, string_class, "<init>", "([BLjava/lang/String;)V");
+    jstring charset = ctor == NULL ? NULL : (*env)->NewStringUTF(env, "UTF-8");
+    jstring result = charset == NULL ? NULL
+            : (jstring) (*env)->NewObject(env, string_class, ctor, bytes, charset);
+    if (charset != NULL) (*env)->DeleteLocalRef(env, charset);
+    if (string_class != NULL) (*env)->DeleteLocalRef(env, string_class);
+    (*env)->DeleteLocalRef(env, bytes);
+    return result;
+}
+
 struct progress_data {
     JNIEnv * env;
     jclass clazz;
@@ -48,8 +70,11 @@ JNIEXPORT jlong JNICALL
 Java_com_whispercpp_java_whisper_WhisperLib_initContext(
         JNIEnv * env, jclass clazz, jstring model_path_str) {
     (void) clazz;
+    if (model_path_str == NULL) return 0;
     const char * model_path = (*env)->GetStringUTFChars(env, model_path_str, NULL);
-    struct whisper_context * ctx = whisper_init_from_file(model_path);
+    if (model_path == NULL) return 0;
+    struct whisper_context * ctx = whisper_init_from_file_with_params(
+            model_path, whisper_context_default_params());
     (*env)->ReleaseStringUTFChars(env, model_path_str, model_path);
     return (jlong) ctx;
 }
@@ -78,6 +103,7 @@ Java_com_whispercpp_java_whisper_WhisperLib_fullTranscribe(
 
     struct whisper_context * ctx = (struct whisper_context *) context_ptr;
     jfloat * audio = (*env)->GetFloatArrayElements(env, audio_data, NULL);
+    if (audio == NULL) return -1;
     const jsize n = (*env)->GetArrayLength(env, audio_data);
     const char * language = "pl";
     const char * language_chars = NULL;
@@ -129,6 +155,7 @@ JNIEXPORT jint JNICALL
 Java_com_whispercpp_java_whisper_WhisperLib_getTextSegmentCount(
         JNIEnv * env, jclass clazz, jlong context_ptr) {
     (void) env; (void) clazz;
+    if (context_ptr == 0) return 0;
     return whisper_full_n_segments((struct whisper_context *) context_ptr);
 }
 
@@ -136,8 +163,9 @@ JNIEXPORT jstring JNICALL
 Java_com_whispercpp_java_whisper_WhisperLib_getTextSegment(
         JNIEnv * env, jclass clazz, jlong context_ptr, jint index) {
     (void) clazz;
+    if (context_ptr == 0) return (*env)->NewStringUTF(env, "");
     const char * text = whisper_full_get_segment_text((struct whisper_context *) context_ptr, index);
-    return (*env)->NewStringUTF(env, text == NULL ? "" : text);
+    return utf8_to_jstring(env, text);
 }
 
 JNIEXPORT jlong JNICALL
@@ -169,7 +197,7 @@ Java_com_whispercpp_java_whisper_WhisperLib_getTextSegmentToken(
     if (context_ptr == 0) return (*env)->NewStringUTF(env, "");
     const char * text = whisper_full_get_token_text(
             (struct whisper_context *) context_ptr, segment_index, token_index);
-    return (*env)->NewStringUTF(env, text == NULL ? "" : text);
+    return utf8_to_jstring(env, text);
 }
 
 JNIEXPORT jlong JNICALL

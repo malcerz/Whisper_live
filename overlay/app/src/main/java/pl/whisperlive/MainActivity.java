@@ -2,17 +2,19 @@ package pl.whisperlive;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.provider.Settings;
+import android.provider.OpenableColumns;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -35,6 +37,7 @@ public final class MainActivity extends Activity implements CaptureService.Liste
     private static final int SAVE_TXT = 2003;
     private static final int SAVE_WAV = 2004;
     private static final int REQUEST_RECORD_AUDIO = 2005;
+    private static final int PICK_AUDIO = 2006;
 
     private static final String PREFS = "whisper_live_ui";
     private static final String PREF_MODEL_URI = "model_uri";
@@ -43,11 +46,15 @@ public final class MainActivity extends Activity implements CaptureService.Liste
     private Uri modelUri;
     private CaptureService service;
     private boolean bound;
+    private boolean bindRequested;
     private boolean pendingStartAfterPermission;
+    private boolean exporting;
+    private String shownPreview = "";
 
     private TextView modelLabel;
     private TextView statusLabel;
     private TextView timerLabel;
+    private TextView speedLabel;
     private TextView warningLabel;
     private TextView preview;
     private ProgressBar progress;
@@ -55,6 +62,7 @@ public final class MainActivity extends Activity implements CaptureService.Liste
     private Button startButton;
     private Button stopButton;
     private Button retranscribeButton;
+    private Button loadAudioButton;
     private Button saveTxtButton;
     private Button saveWavButton;
 
@@ -87,15 +95,18 @@ public final class MainActivity extends Activity implements CaptureService.Liste
     @Override
     protected void onStart() {
         super.onStart();
-        bindService(new Intent(this, CaptureService.class), connection, Context.BIND_AUTO_CREATE);
+        bindRequested = bindService(new Intent(this, CaptureService.class), connection, Context.BIND_AUTO_CREATE);
     }
 
     @Override
     protected void onStop() {
-        if (bound && service != null) {
-            service.clearListener(this);
-            unbindService(connection);
+        if (service != null) service.clearListener(this);
+        // Odpinamy także wtedy, gdy połączenie nie zdążyło się zestawić — inaczej
+        // ServiceConnection wyciekał przy szybkim wyjściu z ekranu.
+        if (bindRequested) {
+            try { unbindService(connection); } catch (IllegalArgumentException ignored) {}
         }
+        bindRequested = false;
         bound = false;
         service = null;
         super.onStop();
@@ -155,6 +166,9 @@ public final class MainActivity extends Activity implements CaptureService.Liste
         root.addView(statusLabel);
         timerLabel = text("", 14, false);
         root.addView(timerLabel);
+        speedLabel = text("", 14, true);
+        speedLabel.setPadding(0, dp(2), 0, dp(2));
+        root.addView(speedLabel);
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
@@ -168,6 +182,16 @@ public final class MainActivity extends Activity implements CaptureService.Liste
         retranscribeButton = button("Ponownie transkrybuj całe zapisane nagranie");
         retranscribeButton.setOnClickListener(v -> retranscribeRecording());
         root.addView(retranscribeButton);
+
+        loadAudioButton = button("Wczytaj plik audio i transkrybuj");
+        loadAudioButton.setOnClickListener(v -> loadAudioRequested());
+        root.addView(loadAudioButton);
+        TextView loadHint = text(
+                "MP3, M4A/AAC, OGG/OPUS, FLAC, WAV, AMR albo ścieżka dźwiękowa z pliku wideo. " +
+                        "Plik jest przeliczany do 16 kHz mono i zastępuje ostatnie nagranie.",
+                12, false);
+        loadHint.setPadding(0, 0, 0, dp(8));
+        root.addView(loadHint);
 
         LinearLayout saveRow = new LinearLayout(this);
         saveRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -222,8 +246,7 @@ public final class MainActivity extends Activity implements CaptureService.Liste
         serviceIntent.putExtra(CaptureService.EXTRA_PROJECTION_DATA, data);
         startForegroundService(serviceIntent);
         statusLabel.setText("Uruchamianie…");
-        startButton.setEnabled(false);
-        stopButton.setEnabled(true);
+        setButtonsBusy();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
@@ -237,13 +260,91 @@ public final class MainActivity extends Activity implements CaptureService.Liste
             Toast.makeText(this, "Brak zapisanego nagrania", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (service != null && service.snapshot().busy) {
+            Toast.makeText(this, "Aplikacja już pracuje", Toast.LENGTH_SHORT).show();
+            return;
+        }
         Intent i = new Intent(this, CaptureService.class);
         i.setAction(CaptureService.ACTION_RETRANSCRIBE);
         i.putExtra(CaptureService.EXTRA_MODEL_URI, modelUri.toString());
         startForegroundService(i);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         statusLabel.setText("Uruchamianie pełnej transkrypcji…");
-        updateIdleButtons();
+        setButtonsBusy();
+    }
+
+    private void loadAudioRequested() {
+        if (modelUri == null) {
+            Toast.makeText(this, "Najpierw wybierz model Whisper .bin", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (service != null && service.snapshot().busy) {
+            Toast.makeText(this, "Aplikacja już pracuje", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        File wav = new File(getFilesDir(), "last_capture.wav");
+        if (wav.isFile() && wav.length() > WavFile.HEADER_SIZE) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Zastąpić ostatnie nagranie?")
+                    .setMessage("Wczytany plik zastąpi ostatnie zapisane nagranie WAV i jego transkrypcję. " +
+                            "Jeśli są potrzebne, zapisz je najpierw przyciskami „Zapisz TXT” / „Zapisz WAV”.")
+                    .setPositiveButton("Wczytaj plik", (d, w) -> pickAudio())
+                    .setNegativeButton("Anuluj", null)
+                    .show();
+        } else {
+            pickAudio();
+        }
+    }
+
+    private void pickAudio() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        // Część dostawców plików zgłasza OGG/OPUS/FLAC jako application/*, stąd szersza lista.
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "audio/*", "video/*", "application/ogg", "application/x-flac", "application/octet-stream"});
+        try {
+            startActivityForResult(i, PICK_AUDIO);
+        } catch (Exception e) {
+            Toast.makeText(this, "Brak aplikacji do wyboru pliku", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void startFileTranscription(Uri audio) {
+        if (modelUri == null) return;
+        if (service != null && service.snapshot().busy) {
+            Toast.makeText(this, "Aplikacja już pracuje", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent i = new Intent(this, CaptureService.class);
+        i.setAction(CaptureService.ACTION_TRANSCRIBE_FILE);
+        i.putExtra(CaptureService.EXTRA_MODEL_URI, modelUri.toString());
+        i.putExtra(CaptureService.EXTRA_AUDIO_URI, audio.toString());
+        i.putExtra(CaptureService.EXTRA_AUDIO_NAME, displayName(audio));
+        startForegroundService(i);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        statusLabel.setText("Uruchamianie transkrypcji pliku…");
+        setButtonsBusy();
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getString(0);
+        } catch (Exception ignored) {}
+        String last = uri.getLastPathSegment();
+        return last == null ? "" : last;
+    }
+
+    /** Blokuje przyciski od razu po zleceniu pracy, zanim usługa przyśle pierwszy stan. */
+    private void setButtonsBusy() {
+        startButton.setEnabled(false);
+        stopButton.setEnabled(true);
+        retranscribeButton.setEnabled(false);
+        loadAudioButton.setEnabled(false);
+        saveTxtButton.setEnabled(false);
+        saveWavButton.setEnabled(false);
+        durationPicker.setEnabled(false);
     }
 
     private void pickModel() {
@@ -280,8 +381,14 @@ public final class MainActivity extends Activity implements CaptureService.Liste
             updateIdleButtons();
             return;
         }
+        if (requestCode == PICK_AUDIO) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                startFileTranscription(data.getData());
+            }
+            return;
+        }
         if (requestCode == CAPTURE_PERMISSION) {
-            if (resultCode == RESULT_OK && data != null) {
+            if (resultCode == RESULT_OK && data != null && modelUri != null) {
                 startCaptureService(resultCode, data);
             } else {
                 Toast.makeText(this, "Bez zgody MediaProjection Android nie pozwala przechwycić dźwięku aplikacji.", Toast.LENGTH_LONG).show();
@@ -291,12 +398,7 @@ public final class MainActivity extends Activity implements CaptureService.Liste
         if ((requestCode == SAVE_TXT || requestCode == SAVE_WAV)
                 && resultCode == RESULT_OK && data != null && data.getData() != null) {
             File source = new File(getFilesDir(), requestCode == SAVE_WAV ? "last_capture.wav" : "last_capture.txt");
-            try {
-                copyFile(source, data.getData());
-                Toast.makeText(this, "Zapisano", Toast.LENGTH_SHORT).show();
-            } catch (Exception e) {
-                Toast.makeText(this, "Błąd zapisu: " + e.getMessage(), Toast.LENGTH_LONG).show();
-            }
+            exportInBackground(source, data.getData());
         }
     }
 
@@ -316,28 +418,88 @@ public final class MainActivity extends Activity implements CaptureService.Liste
         }
     }
 
+    /** Kopiowanie WAV (do ~230 MB) w wątku UI kończyło się błędem ANR. */
+    private void exportInBackground(File source, Uri destination) {
+        if (exporting) {
+            Toast.makeText(this, "Trwa już zapisywanie pliku", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        exporting = true;
+        Toast.makeText(this, "Zapisywanie…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            String failure = null;
+            try {
+                copyFile(source, destination);
+            } catch (Exception e) {
+                failure = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            }
+            final String result = failure;
+            runOnUiThread(() -> {
+                exporting = false;
+                if (isFinishing() || isDestroyed()) return;
+                Toast.makeText(this, result == null ? "Zapisano" : "Błąd zapisu: " + result,
+                        result == null ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show();
+            });
+        }, "whisper-live-export").start();
+    }
+
+    private String speedText(CaptureService.Snapshot s) {
+        if (s.speedAvg <= 0d) return "";
+        StringBuilder b = new StringBuilder("Prędkość transkrypcji: ")
+                .append(formatSpeed(s.speedAvg)).append(" czasu rzeczywistego");
+        if (s.busy && s.speedLast > 0d) {
+            b.append("  (ostatni fragment ").append(formatSpeed(s.speedLast)).append(")");
+        }
+        if (s.retranscribing && !s.decoding && s.recordedAudioMs > s.processedAudioMs) {
+            long etaMs = (long) ((s.recordedAudioMs - s.processedAudioMs) / s.speedAvg);
+            b.append("\nPozostało ok. ").append(formatDuration(etaMs));
+        } else if ((s.recording || s.finishingLive) && s.speedAvg < 1d) {
+            b.append("\nWolniej niż czas rzeczywisty — live nie nadąży, wybierz mniejszy model.");
+        }
+        return b.toString();
+    }
+
+    private static String formatSpeed(double speed) {
+        return String.format(new Locale("pl"), speed >= 10d ? "%.0f×" : "%.1f×", speed);
+    }
+
     @Override
     public void onState(CaptureService.Snapshot s) {
         runOnUiThread(() -> {
             statusLabel.setText(s.error.isEmpty() ? s.status : s.status + ": " + s.error);
             progress.setProgress(s.progress);
-            preview.setText(s.preview);
+            // setText przy każdym odświeżeniu (co 350 ms) kasował zaznaczenie tekstu
+            // i niepotrzebnie przeliczał układ długiej transkrypcji.
+            if (!shownPreview.equals(s.preview)) {
+                shownPreview = s.preview;
+                preview.setText(s.preview);
+            }
             if (s.recording) {
                 timerLabel.setText("Minęło: " + formatDuration(s.elapsedMs) +
                         "   |   Pozostało: " + formatDuration(s.remainingMs) +
                         "   |   nagrano audio: " + formatDuration(s.recordedAudioMs));
+            } else if (s.finishingLive) {
+                timerLabel.setText("Nagrano: " + formatDuration(s.recordedAudioMs) +
+                        "   |   Whisper kończy ostatnie fragmenty (STOP = przerwij)");
+            } else if (s.decoding) {
+                timerLabel.setText("Dekodowanie pliku: " + s.progress + "%");
             } else if (s.retranscribing) {
-                timerLabel.setText("Pełna transkrypcja: " + s.progress + "%   |   czas pracy: " + formatDuration(s.elapsedMs));
+                timerLabel.setText("Transkrypcja: " + s.progress + "%   |   czas pracy: " + formatDuration(s.elapsedMs) +
+                        (s.recordedAudioMs > 0L
+                                ? "   |   audio: " + formatDuration(s.processedAudioMs) + " / " + formatDuration(s.recordedAudioMs)
+                                : ""));
             } else {
                 timerLabel.setText(s.recordedAudioMs > 0L
                         ? "Ostatnie nagranie: " + formatDuration(s.recordedAudioMs) : "");
             }
+            speedLabel.setText(speedText(s));
             warningLabel.setText(s.liveLagged
                     ? "Live Whisper nie nadążył za nagraniem. WAV jest kompletny — użyj „Ponownie transkrybuj całe zapisane nagranie”."
                     : "");
             startButton.setEnabled(!s.busy && modelUri != null);
             stopButton.setEnabled(s.busy);
             retranscribeButton.setEnabled(!s.busy && s.hasRecording && modelUri != null);
+            loadAudioButton.setEnabled(!s.busy && modelUri != null);
             saveTxtButton.setEnabled(!s.busy && s.hasTranscript);
             saveWavButton.setEnabled(!s.busy && s.hasRecording);
             durationPicker.setEnabled(!s.busy);
@@ -369,6 +531,7 @@ public final class MainActivity extends Activity implements CaptureService.Liste
         startButton.setEnabled(!busy && modelUri != null);
         stopButton.setEnabled(busy);
         retranscribeButton.setEnabled(!busy && modelUri != null && wav.isFile() && wav.length() > WavFile.HEADER_SIZE);
+        loadAudioButton.setEnabled(!busy && modelUri != null);
         saveWavButton.setEnabled(!busy && wav.isFile() && wav.length() > WavFile.HEADER_SIZE);
         saveTxtButton.setEnabled(!busy && txt.isFile() && txt.length() > 0L);
         durationPicker.setEnabled(!busy);

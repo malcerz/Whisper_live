@@ -9,6 +9,7 @@ public final class WhisperContext implements AutoCloseable {
     }
 
     private static volatile ProgressListener progressListener;
+    private static volatile boolean abortRequested;
     private long ptr;
 
     private WhisperContext(long ptr) {
@@ -20,7 +21,7 @@ public final class WhisperContext implements AutoCloseable {
         if (ptr == 0L) {
             throw new IllegalStateException("Nie można wczytać modelu: " + modelPath);
         }
-        WhisperLib.setAbortRequested(false);
+        clearAbort();
         return new WhisperContext(ptr);
     }
 
@@ -33,8 +34,11 @@ public final class WhisperContext implements AutoCloseable {
                                            ProgressListener listener) {
         if (ptr == 0L) throw new IllegalStateException("WhisperContext jest zamknięty");
         int threads = Math.max(1, Math.min(6, Runtime.getRuntime().availableProcessors() - 1));
+        // Uwaga: flaga przerwania NIE jest tu zerowana. Zerowanie przy każdym fragmencie
+        // gubiło żądanie Stop, które przyszło tuż przed startem kolejnego fragmentu.
+        // Flagę czyści create() albo jawne clearAbort() na początku zadania.
+        if (abortRequested) return new ArrayList<>();
         progressListener = listener;
-        WhisperLib.setAbortRequested(false);
         int rc;
         try {
             rc = WhisperLib.fullTranscribe(ptr, threads, audio,
@@ -42,7 +46,11 @@ public final class WhisperContext implements AutoCloseable {
         } finally {
             progressListener = null;
         }
-        if (rc != 0) return new ArrayList<>();
+        if (rc != 0) {
+            if (abortRequested) return new ArrayList<>();
+            // Prawdziwy błąd whisper.cpp nie może być po cichu traktowany jak cisza.
+            throw new IllegalStateException("whisper_full zwrócił błąd " + rc);
+        }
 
         int count = WhisperLib.getTextSegmentCount(ptr);
         ArrayList<WhisperSegment> out = new ArrayList<>(count);
@@ -160,7 +168,17 @@ public final class WhisperContext implements AutoCloseable {
     }
 
     public void requestAbort() {
+        abortRequested = true;
         WhisperLib.setAbortRequested(true);
+    }
+
+    public static void clearAbort() {
+        abortRequested = false;
+        WhisperLib.setAbortRequested(false);
+    }
+
+    public static boolean isAbortRequested() {
+        return abortRequested;
     }
 
     @Override
