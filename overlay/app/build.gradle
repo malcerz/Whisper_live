@@ -2,9 +2,25 @@ plugins {
   id 'com.android.application'
 }
 
+// Opcjonalny wspólny klucz podpisu (GitHub Actions: sekrety KEYSTORE_BASE64, KEYSTORE_PASSWORD,
+// KEY_ALIAS, KEY_PASSWORD). Bez niego APK jest podpisywany lokalnym kluczem debug.
+def keystorePath = System.getenv("KEYSTORE_FILE")
+def hasSigningKey = keystorePath != null && !keystorePath.isEmpty() && file(keystorePath).exists()
+
 android {
   namespace "pl.whisperlive"
   compileSdkVersion 36
+
+  signingConfigs {
+    if (hasSigningKey) {
+      shared {
+        storeFile file(keystorePath)
+        storePassword System.getenv("KEYSTORE_PASSWORD")
+        keyAlias System.getenv("KEY_ALIAS")
+        keyPassword System.getenv("KEY_PASSWORD")
+      }
+    }
+  }
 
   lint {
     disable 'ExpiredTargetSdkVersion'
@@ -30,12 +46,13 @@ android {
 
   buildTypes {
     debug {
+      if (hasSigningKey) signingConfig signingConfigs.shared
       externalNativeBuild {
         cmake { arguments "-DCMAKE_BUILD_TYPE=Release" }
       }
     }
     release {
-      signingConfig signingConfigs.debug
+      signingConfig hasSigningKey ? signingConfigs.shared : signingConfigs.debug
       minifyEnabled false
       externalNativeBuild {
         cmake { arguments "-DCMAKE_BUILD_TYPE=Release" }
