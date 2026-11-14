@@ -72,13 +72,30 @@ jobs:
             echo "::error::Signing secret set incomplete. Expected KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD."
             exit 1
           fi
-          if ! printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.p12"; then
-            echo "::error::KEYSTORE_BASE64 is not valid Base64."
-            exit 1
+          fallback() {
+            echo "::warning::$1 APKs will use the runner's temporary DEBUG key."
+            echo "APK_SIGNING_MODE=debug-fallback" >> "$GITHUB_ENV"
+            exit 0
+          }
+          # Tolerate line breaks/spaces pasted into the secret.
+          if ! printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/release.p12"; then
+            fallback "KEYSTORE_BASE64 is not valid Base64."
           fi
-          if ! keytool -list -keystore "$RUNNER_TEMP/release.p12" -storepass "$SIGN_STORE_PASSWORD" -alias "$SIGN_KEY_ALIAS" >/dev/null 2>&1; then
-            echo "::error::Cannot open keystore or signing alias. Verify KEYSTORE_PASSWORD, KEY_ALIAS and file format."
-            exit 1
+          echo "Decoded keystore: $(stat -c %s "$RUNNER_TEMP/release.p12") bytes, type: $(file -b "$RUNNER_TEMP/release.p12" | cut -c1-60)"
+          # keytool messages contain no key material; GitHub masks secret values in logs.
+          if ! STORE_OUT="$(keytool -list -keystore "$RUNNER_TEMP/release.p12" -storepass "$SIGN_STORE_PASSWORD" 2>&1)"; then
+            printf '%s\n' "$STORE_OUT" | head -n 5
+            fallback "Cannot open keystore (wrong KEYSTORE_PASSWORD or unsupported file format)."
+          fi
+          printf '%s\n' "$STORE_OUT" | grep -E 'Keystore type|contains' || true
+          if ! CERT_INFO="$(keytool -list -v -keystore "$RUNNER_TEMP/release.p12" -storepass "$SIGN_STORE_PASSWORD" -alias "$SIGN_KEY_ALIAS" 2>&1)"; then
+            printf '%s\n' "$CERT_INFO" | head -n 5
+            fallback "KEY_ALIAS not found in the keystore."
+          fi
+          printf '%s\n' "$CERT_INFO" | grep -E 'Signature algorithm name|Subject Public Key Algorithm|Entry type' || true
+          # Android's APK signer supports only RSA/EC/DSA keys.
+          if ! printf '%s' "$CERT_INFO" | grep -Eiq 'Subject Public Key Algorithm:.*(RSA|EC)'; then
+            fallback "Signing certificate is not RSA/EC (for example ML-DSA)."
           fi
           echo "APK_SIGNING_MODE=developer-keystore" >> "$GITHUB_ENV"
           printf 'KEYSTORE_FILE=%s\n' "$RUNNER_TEMP/release.p12" >> "$GITHUB_ENV"
