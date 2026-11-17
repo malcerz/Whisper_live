@@ -35,7 +35,10 @@ android {
       }
     }
     release {
-      signingConfig signingConfigs.debug
+      // CI signs the unsigned release in a separate job. Preserve local debug signing.
+      if (System.getenv("WHISPER_CI_UNSIGNED") != "1") {
+        signingConfig signingConfigs.debug
+      }
       minifyEnabled false
       externalNativeBuild {
         cmake { arguments "-DCMAKE_BUILD_TYPE=Release" }
@@ -46,6 +49,9 @@ android {
   externalNativeBuild {
     cmake {
       path "src/main/jni/whisper/CMakeLists.txt"
+      if (System.getenv("WHISPER_CI_UNSIGNED") == "1") {
+        version "3.22.1"
+      }
     }
   }
 
