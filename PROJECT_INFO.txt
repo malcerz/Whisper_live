@@ -1,5 +1,5 @@
 Name: Whisper Live
-Version: 1.0.1
+Version: 1.1.0
 Application ID: pl.whisperlive
 Base: user's WhisperFilesAndroid project + whisper.cpp 52a939a2a762224e255d366c1182b2af4dd1a032
 Purpose: Android AudioPlaybackCapture -> live whisper.cpp TXT + WAV recording

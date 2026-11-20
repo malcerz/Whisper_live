@@ -1,4 +1,4 @@
-# Whisper Live Android v1.0.1
+# Whisper Live Android v1.1.0
 
 Osobna aplikacja oparta na projekcie Whisper Files / whisper.cpp.
 
@@ -17,6 +17,18 @@ Osobna aplikacja oparta na projekcie Whisper Files / whisper.cpp.
 - zapis TXT i WAV przez systemowy selektor plików,
 - arm64-v8a.
 
+## Nowość w v1.1.0: transkrypcja plików offline
+
+- Wybór plików MP3, M4A, M4B, WAV (także z innych aplikacji poprzez systemowy selektor plików).
+- Dekodowanie przez systemowe MediaExtractor/MediaCodec i konwersja do mono 16 kHz.
+- Strumieniowe przetwarzanie fragmentów 30 s z zakładką 2 s — bez wczytywania całego audiobooka do RAM i bez tworzenia olbrzymiego tymczasowego WAV.
+- Osobna usługa działająca na pierwszym planie, wskaźnik postępu, przerwanie przyciskiem STOP.
+- Eksport transkrypcji do **TXT** oraz napisów **SRT** z czasami segmentów.
+- Pliki wynikowe importu są odseparowane od nagrań na żywo: `last_import.txt` / `last_import.srt` nie nadpisują `last_capture.*`.
+- Całość pracuje na telefonie bez internetu, bez zgody MediaProjection dla plików lokalnych.
+- Dostępne kodeki zależą od dekoderów Androida na konkretnym urządzeniu; pliki z DRM nie są obsługiwane.
+- Wybierz model Whisper przed rozpoczęciem transkrypcji pliku. Język transkrypcji: polski.
+
 ## Ograniczenia Androida
 
 AudioPlaybackCapture nie potrafi przechwycić każdego dźwięku systemowego. Aplikacja źródłowa musi zezwalać na capture; treści DRM, rozmowy/VoIP i aplikacje, które jawnie blokują playback capture, mogą dawać ciszę. Android pokazuje systemową zgodę MediaProjection przed każdym nowym nagraniem.
@@ -33,5 +45,5 @@ Wymagane: JDK 17+, Android SDK 36 i NDK 25.2.9519653. Skrypt może doinstalować
 
 Wyniki:
 
-- `out/WhisperLive-v1.0.1-arm64-debug.apk`
-- `out/WhisperLive-v1.0.1-arm64-release.apk`
+- `out/WhisperLive-v1.1.0-arm64-debug.apk`
+- `out/WhisperLive-v1.1.0-arm64-release.apk`
