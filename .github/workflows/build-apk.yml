@@ -3,6 +3,7 @@ name: Build signed WhisperLive APK
 on:
   workflow_dispatch:
   push:
+    branches: [master]
     tags: ['v*']
 
 permissions:
@@ -127,3 +128,54 @@ jobs:
           path: signed/
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish verified APK to GitHub Releases
+    needs: sign
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download verified APK
+        uses: actions/download-artifact@v4
+        with:
+          name: WhisperLive-APK
+          path: signed
+      - name: Publish versioned signed APK
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^[[:space:]]*versionName "\([^"]*\)".*/\1/p' overlay/app/build.gradle | head -n 1)"
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not determine application version"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          test -s signed/WhisperLive-arm64-release.apk
+          grep -q '^APK_SIGNING_MODE=developer-keystore$' signed/signing-info.txt
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists; leaving it unchanged."
+            exit 0
+          fi
+          {
+            echo "WhisperLive Android $TAG, arm64-v8a"
+            echo
+            echo "APK podpisano zweryfikowanym kluczem developerskim GitHub Actions."
+            echo "Szczegoly podpisu: podpisany artifact zawiera signing-info.txt."
+            echo
+            echo "Kod z commitu: $GITHUB_SHA"
+          } > release-notes.md
+          gh release create "$TAG" \
+            "signed/WhisperLive-arm64-release.apk#WhisperLive-$TAG-arm64-release.apk" \
+            --target "$GITHUB_SHA" \
+            --title "WhisperLive $TAG" \
+            --notes-file release-notes.md

@@ -1,4 +1,4 @@
-# Whisper Live Android v1.0.0
+# Whisper Live Android v1.0.1
 
 Osobna aplikacja oparta na projekcie Whisper Files / whisper.cpp.
 
@@ -33,5 +33,5 @@ Wymagane: JDK 17+, Android SDK 36 i NDK 25.2.9519653. Skrypt może doinstalować
 
 Wyniki:
 
-- `out/WhisperLive-v1.0.0-arm64-debug.apk`
-- `out/WhisperLive-v1.0.0-arm64-release.apk`
+- `out/WhisperLive-v1.0.1-arm64-debug.apk`
+- `out/WhisperLive-v1.0.1-arm64-release.apk`
